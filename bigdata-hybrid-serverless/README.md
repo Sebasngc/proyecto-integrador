@@ -3,15 +3,6 @@
 Proyecto integrador que combina **GPU (CUDA + OpenMP)**, **Apache Spark (RDD vs DataFrame)**,
 **modelo de actores (Akka)** y **funciones serverless** en un único flujo extremo a extremo.
 
-```
-Cliente ──HTTP──▶ Orquestador Akka ──▶ ① Validación
-                        │              ② Servicio GPU serverless   (CUDA/OpenMP)
-                        │              ③ Jobs Spark RDD + DataFrame (en paralelo)
-                        │              ④ Análisis (speedup, anomalías)
-                        └──────────────▶ ⑤ Respuesta + persistencia
-```
-
----
 
 ## 1. Estructura del repositorio
 
