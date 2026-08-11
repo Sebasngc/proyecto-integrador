@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Pipeline híbrido GPU + Spark + actores en AWS.
+
+  NOTA ARQUITECTÓNICA IMPORTANTE (se desarrolla en el informe):
+  AWS Lambda NO ofrece GPU. Por eso hay dos caminos para la fase de
+  preprocesamiento y el orquestador elige según el tamaño de la entrada:
+
+    * arrays pequeños  -> Lambda `GpuPreprocessFunction`, que ejecuta el camino
+      OpenMP sobre vCPU. Arranque en frío de ~1 s y coste despreciable.
+    * arrays grandes   -> `SubmitBatchGpuFunction` encola un job en AWS Batch
+      sobre instancias G5 (NVIDIA A10G) con capacidad gestionada: escala desde
+      cero, se paga por segundo de uso y sí tiene CUDA.
+
+  Si el requisito es GPU *y* serverless puro en un único salto, Google Cloud
+  Run con GPU o Azure Container Apps serverless GPU lo resuelven mejor: ver
+  ../gcp/ y ../azure/.
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 3008
+    Architectures: [x86_64]
+    Tracing: Active
+    Environment:
+      Variables:
+        DATA_BUCKET: !Ref DataBucket
+        JOBS_TABLE: !Ref JobsTable
+        LOG_LEVEL: INFO
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: bigdata-hybrid
+  GpuBatchQueue:
+    Type: String
+    Default: ""
+    Description: ARN de la cola de AWS Batch con instancias GPU (opcional)
+
+Resources:
+
+  # ------------------------------------------------------------------ datos --
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-data-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          # Los intermedios normalizados se regeneran en minutos: no merece la
+          # pena pagar por almacenarlos indefinidamente.
+          - Id: expire-intermediates
+            Status: Enabled
+            Prefix: processed/
+            ExpirationInDays: 7
+
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-jobs"
+      BillingMode: PAY_PER_REQUEST     # coherente con "escala bajo demanda"
+      AttributeDefinitions:
+        - { AttributeName: job_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: job_id, KeyType: HASH }
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ------------------------------------------------- fase 1: preprocesamiento --
+  GpuPreprocessFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: ../../01-gpu-preprocessing
+      DockerTag: cpu-runtime
+    Properties:
+      PackageType: Image
+      MemorySize: 10240          # en Lambda, más memoria = más vCPU: a 10 GB se
+      Timeout: 900               # asignan ~6 vCPU, que es lo que aprovecha OpenMP
+      Environment:
+        Variables:
+          OMP_NUM_THREADS: 6
+          NORMALIZE_LIB: /opt/lib/libnormalize.so
+      Policies:
+        - S3CrudPolicy: { BucketName: !Ref DataBucket }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /preprocess
+            Method: POST
+
+  # ------------------------------------------------------- fase 2: Spark ------
+  SparkLauncherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: spark_launcher.handler
+      Runtime: python3.12
+      Timeout: 60                # sólo lanza y devuelve: no espera al job
+      Environment:
+        Variables:
+          EMR_APPLICATION_ID: !Ref SparkApplication
+          EMR_EXECUTION_ROLE: !GetAtt EmrExecutionRole.Arn
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - emr-serverless:StartJobRun
+                - emr-serverless:GetJobRun
+                - emr-serverless:CancelJobRun
+              Resource: '*'
+            - Effect: Allow
+              Action: iam:PassRole
+              Resource: !GetAtt EmrExecutionRole.Arn
+        - S3CrudPolicy: { BucketName: !Ref DataBucket }
+      Events:
+        Submit:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /submit, Method: POST }
+        Status:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /status, Method: POST }
+
+  SparkApplication:
+    Type: AWS::EMRServerless::Application
+    Properties:
+      Name: !Sub "${ProjectName}-spark"
+      ReleaseLabel: emr-7.1.0
+      Type: Spark
+      # Capacidad pre-inicializada: mantiene workers calientes y baja el
+      # arranque de ~90 s a ~15 s. Es el compromiso clásico coste/latencia del
+      # serverless; con maximumCapacity se acota el gasto.
+      InitialCapacity:
+        - Key: Driver
+          Value:
+            WorkerCount: 1
+            WorkerConfiguration: { Cpu: "2 vCPU", Memory: "8 GB" }
+        - Key: Executor
+          Value:
+            WorkerCount: 4
+            WorkerConfiguration: { Cpu: "4 vCPU", Memory: "16 GB" }
+      MaximumCapacity: { Cpu: "200 vCPU", Memory: "800 GB", Disk: "1000 GB" }
+      AutoStopConfiguration: { Enabled: true, IdleTimeoutMinutes: 5 }
+
+  EmrExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: emr-serverless.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: s3-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:ListBucket, s3:DeleteObject]
+                Resource:
+                  - !Sub "${DataBucket.Arn}"
+                  - !Sub "${DataBucket.Arn}/*"
+
+  # ------------------------------------------------- callback del orquestador --
+  JobCallbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: job_callback.handler
+      Runtime: python3.12
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
+      Events:
+        Callback:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /callback, Method: POST }
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: v1
+      Throttle: { BurstLimit: 100, RateLimit: 50 }
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","status":"$context.status","latency":"$context.responseLatency"}'
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/http-api/${ProjectName}"
+      RetentionInDays: 14
+
+Outputs:
+  ApiEndpoint:
+    Description: URL base de la API serverless
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/v1"
+  DataBucketName:
+    Value: !Ref DataBucket
+  SparkApplicationId:
+    Value: !Ref SparkApplication
+  JobsTableName:
+    Value: !Ref JobsTable

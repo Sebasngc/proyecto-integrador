@@ -1,0 +1,11 @@
+numpy>=1.26,<3
+pyspark>=3.5,<4
+pyarrow>=16.0
+pandas>=2.2
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+requests>=2.32
+fsspec>=2024.6
+s3fs>=2024.6
+matplotlib>=3.8

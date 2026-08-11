@@ -1,0 +1,5 @@
+# Imagen Lambda mínima: sin FastAPI/uvicorn (el handler no los necesita)
+numpy>=1.26,<3
+fsspec>=2024.6
+s3fs>=2024.6
+pyarrow>=16.0

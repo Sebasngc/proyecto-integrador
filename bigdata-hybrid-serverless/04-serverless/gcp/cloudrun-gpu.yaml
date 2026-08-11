@@ -1,0 +1,66 @@
+# =============================================================================
+#  Cloud Run con GPU — el camino "serverless + CUDA" en un solo salto.
+#
+#  A diferencia de AWS Lambda, Cloud Run sí puede adjuntar una GPU NVIDIA L4 al
+#  contenedor, mantiene el escalado a cero y factura por segundo. Es, con
+#  diferencia, la opción que mejor cumple literalmente el enunciado
+#  ("microservicio serverless que procesa en la GPU").
+#
+#  Despliegue:
+#    gcloud run services replace gcp/cloudrun-gpu.yaml --region us-central1
+#
+#  Equivalente en una línea:
+#    gcloud run deploy gpu-preprocess --image $IMAGE --gpu 1 \
+#      --gpu-type nvidia-l4 --cpu 8 --memory 32Gi --max-instances 5 \
+#      --no-cpu-throttling --region us-central1
+# =============================================================================
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: gpu-preprocess
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        # Escalado a cero: sin tráfico, coste cero. El precio es el arranque en
+        # frío, dominado por descargar la imagen CUDA e inicializar el driver.
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "5"
+        # Sin throttling de CPU: el hilo de OpenMP del host debe seguir vivo
+        # mientras la GPU trabaja, o el despacho multi-stream se serializa.
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/startup-cpu-boost: "true"
+        run.googleapis.com/gpu-zonal-redundancy-disabled: "true"
+    spec:
+      # Una petición por instancia: el kernel satura la GPU, así que servir dos
+      # a la vez sólo añade contención y latencia de cola.
+      containerConcurrency: 1
+      timeoutSeconds: 900
+      containers:
+        - image: REGION-docker.pkg.dev/PROJECT/repo/gpu-preprocess:cuda
+          ports:
+            - containerPort: 8080
+          env:
+            - name: NORMALIZE_LIB
+              value: /opt/lib/libnormalize.so
+            - name: OMP_NUM_THREADS
+              value: "8"
+            - name: MAX_INLINE_ELEMENTS
+              value: "1000000"
+          resources:
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          startupProbe:
+            httpGet: { path: /health }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /health }
+            periodSeconds: 30
+      nodeSelector:
+        run.googleapis.com/accelerator: nvidia-l4

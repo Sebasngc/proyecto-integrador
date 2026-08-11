@@ -1,0 +1,135 @@
+# =============================================================================
+#  Entorno local completo para la demo y el vídeo.
+#
+#    docker compose up -d                 # todo salvo la GPU
+#    docker compose --profile gpu up -d   # incluye el servicio CUDA (requiere
+#                                         # nvidia-container-toolkit instalado)
+#
+#  Servicios:
+#    minio            :9000  almacén compatible con S3 (sustituye a S3/HDFS)
+#    gpu-preprocess   :8080  microservicio de normalización
+#    spark-launcher   :8082  emula EMR Serverless
+#    orchestrator     :8081  sistema de actores Akka + API HTTP
+# =============================================================================
+services:
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["minio-data:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      retries: 5
+
+  # Crea el bucket una vez y termina: evita tener que hacerlo a mano en la demo.
+  minio-init:
+    image: minio/mc:latest
+    depends_on: { minio: { condition: service_healthy } }
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb -p local/bigdata-data &&
+      echo 'bucket bigdata-data listo'"
+
+  # Servicio HTTP normal (uvicorn). Expone /health, /info y /preprocess, que es
+  # lo que espera el orquestador. NO es la imagen de Lambda: ver perfil `lambda`.
+  gpu-preprocess:
+    build:
+      context: ./01-gpu-preprocessing
+      target: cpu-service
+    ports: ["8080:8080"]
+    environment:
+      NORMALIZE_LIB: /opt/lib/libnormalize.so
+      OMP_NUM_THREADS: 4
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT_URL: http://minio:9000
+    # /app/data en TODOS los contenedores: el orquestador pasa la misma URI al
+    # servicio GPU y a Spark, así que la ruta debe significar lo mismo en ambos.
+    volumes: ["./data:/app/data"]
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    depends_on: [minio]
+
+  # La MISMA lógica empaquetada como Lambda, para enseñar en el vídeo que el
+  # artefacto de nube existe. Sólo responde en /2015-03-31/.../invocations.
+  #   docker compose --profile lambda up -d gpu-lambda
+  gpu-lambda:
+    profiles: ["lambda"]
+    build:
+      context: ./01-gpu-preprocessing
+      target: cpu-runtime
+    ports: ["9080:8080"]
+    environment:
+      NORMALIZE_LIB: /opt/lib/libnormalize.so
+      OMP_NUM_THREADS: 4
+    volumes: ["./data:/app/data"]
+
+  # Mismo servicio con GPU real. `docker compose --profile gpu up gpu-preprocess-cuda`
+  gpu-preprocess-cuda:
+    profiles: ["gpu"]
+    build:
+      context: ./01-gpu-preprocessing
+      target: gpu-runtime
+      args: { CUDA_ARCH: sm_89 }
+    ports: ["8080:8080"]
+    environment:
+      NORMALIZE_LIB: /opt/lib/libnormalize.so
+      OMP_NUM_THREADS: 8
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes: ["./data:/data"]
+
+  spark-launcher:
+    # Imagen propia: la oficial de Spark no trae Python. Ver 02-spark-jobs/Dockerfile.
+    build:
+      context: .
+      dockerfile: 02-spark-jobs/Dockerfile
+    working_dir: /app
+    ports: ["8082:8082"]
+    volumes: [".:/app"]
+    environment:
+      SPARK_LOCAL_IP: 127.0.0.1
+      PYSPARK_PYTHON: python3
+      PYTHONPATH: /app/02-spark-jobs
+      HOME: /tmp
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:8082/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+  orchestrator:
+    build: ./03-akka-orchestrator
+    ports: ["8081:8081"]
+    environment:
+      HTTP_PORT: 8081
+      GPU_ENDPOINT: http://gpu-preprocess:8080
+      SPARK_LAUNCHER_ENDPOINT: http://spark-launcher:8082
+      REPOSITORY_TYPE: memory
+      LOG_LEVEL: INFO
+    # Esperar a que estén SANOS, no sólo arrancados: el lanzador tarda ~30 s en
+    # instalar dependencias y arrancar uvicorn.
+    depends_on:
+      gpu-preprocess:  { condition: service_healthy }
+      spark-launcher:  { condition: service_healthy }
+
+volumes:
+  minio-data:

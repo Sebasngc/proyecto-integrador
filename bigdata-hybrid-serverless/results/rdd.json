@@ -1,0 +1,85 @@
+{
+  "pipeline": "rdd",
+  "input": "file:///Users/sebasngc/Downloads/files (1)/bigdata-hybrid-serverless/data/sensors.parquet",
+  "runs": 1,
+  "times_s": [
+    12.944966725000995
+  ],
+  "median_s": 12.944966725000995,
+  "min_s": 12.944966725000995,
+  "groups": 39573,
+  "anomalies": 2840,
+  "top": [
+    {
+      "region": "af-south",
+      "sensor_id": "S002445",
+      "readings": 1,
+      "mean_norm": -3.0974891284693182,
+      "stddev_norm": 0.0,
+      "min_norm": -3.0974891284693182,
+      "max_norm": -3.0974891284693182,
+      "anomalies": 1,
+      "anomaly_ratio": 1.0,
+      "continent": "AF",
+      "tier": "bronze",
+      "sla_ms": 500
+    },
+    {
+      "region": "af-south",
+      "sensor_id": "S000013",
+      "readings": 1,
+      "mean_norm": -5.544216006431018,
+      "stddev_norm": 0.0,
+      "min_norm": -5.544216006431018,
+      "max_norm": -5.544216006431018,
+      "anomalies": 1,
+      "anomaly_ratio": 1.0,
+      "continent": "AF",
+      "tier": "bronze",
+      "sla_ms": 500
+    },
+    {
+      "region": "af-south",
+      "sensor_id": "S001457",
+      "readings": 1,
+      "mean_norm": -7.20679061082421,
+      "stddev_norm": 0.0,
+      "min_norm": -7.20679061082421,
+      "max_norm": -7.20679061082421,
+      "anomalies": 1,
+      "anomaly_ratio": 1.0,
+      "continent": "AF",
+      "tier": "bronze",
+      "sla_ms": 500
+    },
+    {
+      "region": "af-south",
+      "sensor_id": "S001197",
+      "readings": 1,
+      "mean_norm": -6.706998807370643,
+      "stddev_norm": 0.0,
+      "min_norm": -6.706998807370643,
+      "max_norm": -6.706998807370643,
+      "anomalies": 1,
+      "anomaly_ratio": 1.0,
+      "continent": "AF",
+      "tier": "bronze",
+      "sla_ms": 500
+    },
+    {
+      "region": "af-south",
+      "sensor_id": "S004329",
+      "readings": 1,
+      "mean_norm": 3.5486787883360282,
+      "stddev_norm": 0.0,
+      "min_norm": 3.5486787883360282,
+      "max_norm": 3.5486787883360282,
+      "anomalies": 1,
+      "anomaly_ratio": 1.0,
+      "continent": "AF",
+      "tier": "bronze",
+      "sla_ms": 500
+    }
+  ],
+  "spark_version": "3.5.1"
+}
